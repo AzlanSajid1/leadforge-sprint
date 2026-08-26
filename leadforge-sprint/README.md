@@ -44,14 +44,26 @@ Each lead contains:
 
 ## Current Status
 
-Stage 1 collector logic has been implemented.
+Stage 1 collector logic has been implemented and tested successfully.
 
-During testing, the Overpass API endpoint returned HTTP 406.
-The issue is currently being investigated and will be resolved separately.
+The collector was tested using a real Overpass data export for London. Since the live Overpass API was returning HTTP 406/502 errors during development, the `--input-json` offline fallback was used to continue testing with real Overpass data.
 
-The file `stages/debug_test.py` contains the current Overpass API debugging test.
+Latest test results:
+
+- 300 raw businesses loaded
+- 134 businesses had usable websites
+- 110 leads remained after domain deduplication
+- 0 fuzzy-name duplicates
+- 0 missing required fields
+- 110 leads written to `data/01_leads.jsonl`
+- 75 leads contained extracted `site_text`
+- 35 leads had empty `site_text` due to website/extraction failures
+
+The generated `data/01_leads.jsonl` file contains the final Stage 1 output.
 
 ## Test Command
 
+Latest successful test:
+
 ```bash
-python stages/01_collect.py --category amenity=car_repair --city Lahore --limit 5
+python stages/01_collect.py --category amenity=restaurant --bbox "51.28,-0.51,51.70,0.33" --city London --limit 400 --input-json data/overpass_export_london_400.json
