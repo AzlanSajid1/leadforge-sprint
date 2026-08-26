@@ -1,6 +1,6 @@
 # LeadForge Sprint
 
-A working lead-generation pipeline, built by seven interns in four days.
+A working lead-generation pipeline.
 
 ---
 
