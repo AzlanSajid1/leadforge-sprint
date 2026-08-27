@@ -1,3 +1,5 @@
-requests
-trafilatura
-rapidfuzz
+requests>=2.31.0
+trafilatura>=1.6.0
+rapidfuzz>=3.0.0
+streamlit>=1.35.0
+pandas>=2.0.0

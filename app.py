@@ -1,0 +1,936 @@
+import os
+import json
+from datetime import datetime, timezone
+import pandas as pd
+import streamlit as st
+
+# ==============================================================================
+# LEADFORGE REVIEW DASHBOARD
+# Author: Umer Mujahid
+# Deliverable: Stage 6 Review Screen (app.py)
+# Output: data/06_approved.jsonl
+# ==============================================================================
+
+DEFAULT_APPROVED_PATH = os.path.join("data", "06_approved.jsonl")
+
+# Pipeline stages metadata for live teammate data tracking
+PIPELINE_STAGES = [
+    {
+        "stage_num": 1,
+        "name": "Collect",
+        "owner": "Nurul Huda",
+        "file": os.path.join("data", "01_leads.jsonl"),
+        "desc": "OpenStreetMap Overpass API business collection & website scraping"
+    },
+    {
+        "stage_num": 2,
+        "name": "Visual Audit",
+        "owner": "Intern 5",
+        "file": os.path.join("data", "02_visual.jsonl"),
+        "desc": "Desktop/mobile screenshots & automated website health checks"
+    },
+    {
+        "stage_num": 3,
+        "name": "Research",
+        "owner": "Haseeb Khan",
+        "file": os.path.join("data", "03_research.jsonl"),
+        "desc": "LLM site analysis, 3 structured findings & quote verification"
+    },
+    {
+        "stage_num": 4,
+        "name": "Scoring",
+        "owner": "Azlan",
+        "file": os.path.join("data", "04_scored.jsonl"),
+        "desc": "Opportunity scoring (0-100), Band assignment (A/B/C) & reasons"
+    },
+    {
+        "stage_num": 5,
+        "name": "Email Writing",
+        "owner": "Amna Miraj",
+        "file": os.path.join("data", "05_drafts.jsonl"),
+        "desc": "Personalized outreach email drafting referencing verified findings"
+    },
+    {
+        "stage_num": 6,
+        "name": "Review Dashboard",
+        "owner": "Umer Mujahid",
+        "file": os.path.join("data", "06_approved.jsonl"),
+        "desc": "Human-in-the-loop review, edit, approval & sandbox delivery"
+    }
+]
+
+
+# ==============================================================================
+# DATA MANAGEMENT HELPERS
+# ==============================================================================
+
+def find_available_datasets():
+    """Discover all JSONL data files currently present in workspace."""
+    found = []
+    
+    # Priority paths
+    priority_paths = [
+        os.path.join("data", "05_drafts.jsonl"),
+        os.path.join("data", "01_leads.jsonl"),
+        os.path.join("data", "sample_10.jsonl"),
+        os.path.join("data", "04_scored.jsonl"),
+        os.path.join("data", "03_research.jsonl"),
+        os.path.join("data", "02_visual.jsonl"),
+        os.path.join("data", "06_approved.jsonl"),
+    ]
+    
+    for p in priority_paths:
+        if os.path.exists(p) and p not in found:
+            found.append(p)
+            
+    # Check for any other jsonl files inside data/
+    if os.path.exists("data"):
+        for f in os.listdir("data"):
+            full_p = os.path.join("data", f)
+            if f.endswith(".jsonl") and full_p not in found:
+                found.append(full_p)
+                
+    return found
+
+
+def load_jsonl(file_path):
+    """Load records from a JSONL file into a list of dictionaries."""
+    records = []
+    if not os.path.exists(file_path):
+        return records
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line_str = line.strip()
+            if line_str:
+                try:
+                    records.append(json.loads(line_str))
+                except json.JSONDecodeError:
+                    continue
+    return records
+
+
+def load_decisions(approved_file=DEFAULT_APPROVED_PATH):
+    """Load previously saved decisions from 06_approved.jsonl keyed by lead_id."""
+    decisions = {}
+    if os.path.exists(approved_file):
+        records = load_jsonl(approved_file)
+        for r in records:
+            lid = r.get("lead_id")
+            if lid:
+                decisions[lid] = r
+    return decisions
+
+
+def save_decision(lead_record, decision, final_subject, final_body, reviewer="Umer Mujahid", approved_file=DEFAULT_APPROVED_PATH):
+    """
+    Append or update an approved/rejected lead in 06_approved.jsonl.
+    Follows Rule 1: Copies EVERY existing field through untouched, then adds decision metadata.
+    """
+    os.makedirs(os.path.dirname(approved_file), exist_ok=True)
+    
+    existing_records = []
+    if os.path.exists(approved_file):
+        existing_records = load_jsonl(approved_file)
+    
+    now_utc = datetime.now(timezone.utc).isoformat()
+    
+    updated_record = dict(lead_record)
+    updated_record["decision"] = decision
+    updated_record["final_subject"] = final_subject
+    updated_record["final_body"] = final_body
+    updated_record["decided_at"] = now_utc
+    updated_record["decided_by"] = reviewer
+    
+    lead_id = lead_record.get("lead_id")
+    replaced = False
+    new_records_list = []
+    for r in existing_records:
+        if r.get("lead_id") == lead_id:
+            new_records_list.append(updated_record)
+            replaced = True
+        else:
+            new_records_list.append(r)
+            
+    if not replaced:
+        new_records_list.append(updated_record)
+        
+    with open(approved_file, "w", encoding="utf-8") as f:
+        for rec in new_records_list:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            
+    return updated_record
+
+
+def remove_decision(lead_id, approved_file=DEFAULT_APPROVED_PATH):
+    """Revert a decision, removing the record from 06_approved.jsonl."""
+    if not os.path.exists(approved_file):
+        return
+    existing_records = load_jsonl(approved_file)
+    new_list = [r for r in existing_records if r.get("lead_id") != lead_id]
+    with open(approved_file, "w", encoding="utf-8") as f:
+        for rec in new_list:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+# ==============================================================================
+# UI RENDERING APPLICATION
+# ==============================================================================
+
+def render_app():
+    st.set_page_config(
+        page_title="LeadForge Review Dashboard",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    # Clean, professional styling without emoji decorations
+    st.markdown("""
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+        
+        html, body, [class*="css"] {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        
+        code, pre {
+            font-family: 'JetBrains Mono', monospace !important;
+        }
+        
+        /* Clean Professional Header */
+        .leadforge-header {
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+            border-radius: 12px;
+            padding: 1.4rem 1.8rem;
+            margin-bottom: 1.4rem;
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        
+        .leadforge-title {
+            font-size: 1.75rem;
+            font-weight: 800;
+            color: #ffffff;
+            letter-spacing: -0.02em;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .leadforge-subtitle {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-top: 0.3rem;
+            max-width: 700px;
+            line-height: 1.4;
+        }
+        
+        /* Metric Box */
+        .metric-card {
+            background: #1e293b;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 0.9rem 1rem;
+            text-align: center;
+            transition: transform 0.15s ease, border-color 0.15s ease;
+        }
+        .metric-card:hover {
+            border-color: rgba(99, 102, 241, 0.4);
+            transform: translateY(-2px);
+        }
+        .metric-value {
+            font-size: 1.45rem;
+            font-weight: 800;
+            color: #38bdf8;
+            letter-spacing: -0.02em;
+        }
+        .metric-label {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: #94a3b8;
+            font-weight: 600;
+            margin-top: 0.25rem;
+        }
+        
+        /* Badge System */
+        .badge {
+            display: inline-block;
+            padding: 0.22rem 0.65rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .badge-band-a { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); }
+        .badge-band-b { background: rgba(234, 179, 8, 0.15); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.35); }
+        .badge-band-c { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.35); }
+        .badge-band-raw { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.35); }
+        
+        .badge-status-approved { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+        .badge-status-rejected { background: rgba(244, 63, 94, 0.2); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.4); }
+        .badge-status-pending { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+        
+        /* Findings Box */
+        .finding-box {
+            background: rgba(30, 41, 59, 0.85);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-left: 4px solid #6366f1;
+            border-radius: 8px;
+            padding: 0.85rem 1.15rem;
+            margin-bottom: 0.75rem;
+        }
+        .finding-claim {
+            font-weight: 600;
+            color: #f8fafc;
+            font-size: 0.92rem;
+        }
+        .finding-quote {
+            font-size: 0.84rem;
+            color: #94a3b8;
+            font-style: italic;
+            margin-top: 0.35rem;
+            line-height: 1.4;
+        }
+        
+        /* Screenshot Fallback */
+        .screenshot-fallback {
+            background: #090d16;
+            border: 2px dashed rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            padding: 2.2rem 1rem;
+            text-align: center;
+            color: #64748b;
+            font-size: 0.85rem;
+        }
+        
+        /* Health Checklist Pill */
+        .health-pill {
+            display: inline-flex;
+            align-items: center;
+            background: #0f172a;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 0.35rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-right: 0.4rem;
+            margin-bottom: 0.4rem;
+        }
+        
+        /* Pipeline Card */
+        .pipeline-card {
+            background: #1e293b;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 1.15rem;
+            margin-bottom: 1rem;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ==============================================================================
+    # SIDEBAR CONTROLS
+    # ==============================================================================
+
+    st.sidebar.markdown("### Pipeline Data Source")
+
+    available_datasets = find_available_datasets()
+    if not available_datasets:
+        sample_path = os.path.join("data", "sample_10.jsonl")
+        available_datasets = [sample_path] if os.path.exists(sample_path) else ["data/sample_10.jsonl"]
+
+    # Format clean labels for datasets
+    dataset_labels = {}
+    for p in available_datasets:
+        count = len(load_jsonl(p))
+        if "01_leads.jsonl" in p:
+            label = f"Stage 1: Collected Leads ({count} rows)"
+        elif "02_visual.jsonl" in p:
+            label = f"Stage 2: Visual Audit ({count} rows)"
+        elif "03_research.jsonl" in p:
+            label = f"Stage 3: LLM Research ({count} rows)"
+        elif "04_scored.jsonl" in p:
+            label = f"Stage 4: Scored Leads ({count} rows)"
+        elif "05_drafts.jsonl" in p:
+            label = f"Stage 5: Drafted Emails ({count} rows)"
+        elif "06_approved.jsonl" in p:
+            label = f"Stage 6: Approved Outbox ({count} rows)"
+        elif "sample_10.jsonl" in p:
+            label = f"Sample 10 Dataset ({count} rows)"
+        else:
+            label = f"{os.path.basename(p)} ({count} rows)"
+        dataset_labels[label] = p
+
+    default_idx = 0
+    labels_list = list(dataset_labels.keys())
+    for idx, lbl in enumerate(labels_list):
+        if "Sample 10" in lbl:
+            default_idx = idx
+            break
+        elif "Stage 5" in lbl:
+            default_idx = idx
+            break
+
+    selected_dataset_label = st.sidebar.selectbox(
+        "Active Dataset",
+        options=labels_list,
+        index=default_idx,
+        help="Choose upstream stage data to review in the dashboard."
+    )
+    selected_dataset_path = dataset_labels[selected_dataset_label]
+
+    reviewer_name = st.sidebar.text_input("Reviewer Name", value="Umer Mujahid")
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Filters & Search")
+
+    search_query = st.sidebar.text_input("Search Lead", placeholder="Business name, domain, city...")
+
+    band_filter = st.sidebar.multiselect(
+        "Filter by Band",
+        options=["Band A", "Band B", "Band C", "Raw (Stage 1)"],
+        default=["Band A", "Band B", "Band C", "Raw (Stage 1)"]
+    )
+
+    status_filter = st.sidebar.multiselect(
+        "Filter by Status",
+        options=["Pending", "Approved", "Rejected"],
+        default=["Pending", "Approved", "Rejected"]
+    )
+
+    sort_option = st.sidebar.selectbox(
+        "Sort Leads",
+        options=[
+            "Score: High to Low",
+            "Score: Low to High",
+            "Name: A to Z",
+            "Lead ID"
+        ],
+        index=0
+    )
+
+    # Load active data & decisions
+    raw_leads = load_jsonl(selected_dataset_path)
+    saved_decisions = load_decisions(DEFAULT_APPROVED_PATH)
+
+    leads_list = []
+    for lead in raw_leads:
+        lid = lead.get("lead_id", "unknown_id")
+        lead_copy = dict(lead)
+        if lid in saved_decisions:
+            lead_copy["decision"] = saved_decisions[lid].get("decision", "pending")
+            lead_copy["final_subject"] = saved_decisions[lid].get("final_subject", lead.get("subject", ""))
+            lead_copy["final_body"] = saved_decisions[lid].get("final_body", lead.get("body", ""))
+            lead_copy["decided_at"] = saved_decisions[lid].get("decided_at", None)
+            lead_copy["decided_by"] = saved_decisions[lid].get("decided_by", None)
+        else:
+            lead_copy["decision"] = lead.get("decision", "pending")
+            lead_copy["final_subject"] = lead.get("subject", "")
+            lead_copy["final_body"] = lead.get("body", "")
+            lead_copy["decided_at"] = lead.get("decided_at", None)
+            lead_copy["decided_by"] = lead.get("decided_by", None)
+        leads_list.append(lead_copy)
+
+    # Filter logic
+    filtered_leads = []
+    for lead in leads_list:
+        name = lead.get("name", "")
+        domain = lead.get("domain", "")
+        city = lead.get("city", "")
+        category = lead.get("category", "")
+        band = lead.get("band")
+        
+        if band in ["A", "B", "C"]:
+            band_label = f"Band {band}"
+        else:
+            band_label = "Raw (Stage 1)"
+            
+        decision = lead.get("decision", "pending")
+        status_label = "Approved" if decision in ["approve", "edit"] else ("Rejected" if decision == "reject" else "Pending")
+        
+        if search_query:
+            q = search_query.lower()
+            if not (q in name.lower() or q in domain.lower() or q in city.lower() or q in category.lower()):
+                continue
+                
+        if band_label not in band_filter:
+            continue
+            
+        if status_label not in status_filter:
+            continue
+            
+        filtered_leads.append(lead)
+
+    # Sorting logic
+    if sort_option == "Score: High to Low":
+        filtered_leads.sort(key=lambda x: x.get("score", 0), reverse=True)
+    elif sort_option == "Score: Low to High":
+        filtered_leads.sort(key=lambda x: x.get("score", 0))
+    elif sort_option == "Name: A to Z":
+        filtered_leads.sort(key=lambda x: x.get("name", "").lower())
+    elif sort_option == "Lead ID":
+        filtered_leads.sort(key=lambda x: x.get("lead_id", ""))
+
+    # ==============================================================================
+    # HEADER BANNER & KPI METRICS
+    # ==============================================================================
+
+    st.markdown("""
+    <div class="leadforge-header">
+        <div>
+            <div class="leadforge-title">LEADFORGE <span style="color:#6366f1; font-weight:400;">| Review Screen</span></div>
+            <div class="leadforge-subtitle">Stage 6 Human-in-the-Loop Review Dashboard — Inspect findings, audit website visuals, refine personalized email outreach, and deliver to Mailtrap sandbox.</div>
+        </div>
+        <div>
+            <span style="background: rgba(99,102,241,0.2); border: 1px solid rgba(99,102,241,0.4); padding: 0.4rem 0.85rem; border-radius: 9999px; font-size: 0.8rem; font-weight: 600; color: #a5b4fc;">
+                Sprint 2026 · Stage 6
+            </span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    total_count = len(leads_list)
+    approved_count = sum(1 for l in leads_list if l.get("decision") in ["approve", "edit"])
+    rejected_count = sum(1 for l in leads_list if l.get("decision") == "reject")
+    pending_count = total_count - (approved_count + rejected_count)
+    band_a_count = sum(1 for l in leads_list if l.get("band") == "A")
+    band_b_count = sum(1 for l in leads_list if l.get("band") == "B")
+    band_c_count = sum(1 for l in leads_list if l.get("band") == "C")
+    raw_stage1_count = sum(1 for l in leads_list if not l.get("band"))
+
+    kpi_cols = st.columns(6)
+    with kpi_cols[0]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{total_count}</div><div class="metric-label">Total Leads</div></div>', unsafe_allow_html=True)
+    with kpi_cols[1]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#4ade80;">{approved_count}</div><div class="metric-label">Approved ({round((approved_count/total_count)*100 if total_count else 0)}%)</div></div>', unsafe_allow_html=True)
+    with kpi_cols[2]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#60a5fa;">{pending_count}</div><div class="metric-label">Pending Review</div></div>', unsafe_allow_html=True)
+    with kpi_cols[3]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#fb7185;">{rejected_count}</div><div class="metric-label">Rejected</div></div>', unsafe_allow_html=True)
+    with kpi_cols[4]:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#4ade80;">{band_a_count}</div><div class="metric-label">Band A (High)</div></div>', unsafe_allow_html=True)
+    with kpi_cols[5]:
+        tier_val = f"{band_b_count + band_c_count}" if not raw_stage1_count else f"{raw_stage1_count} Raw"
+        tier_lbl = "Band B / C" if not raw_stage1_count else "Stage 1 Leads"
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#facc15;">{tier_val}</div><div class="metric-label">{tier_lbl}</div></div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Main Navigation Tabs
+    tab_review, tab_pipeline, tab_approved_queue, tab_raw_inspector = st.tabs([
+        "Lead Review & Action",
+        "Live Teammate Pipeline Tracker",
+        f"Approved Outbox ({approved_count})",
+        "Raw JSON Inspector"
+    ])
+
+    # ==============================================================================
+    # TAB 1: REVIEW & ACTION WORKSPACE
+    # ==============================================================================
+
+    with tab_review:
+        if not filtered_leads:
+            st.info("No leads match the active filters or search query. Adjust the sidebar filters to view leads.")
+        else:
+            col_list, col_detail = st.columns([1, 2.2], gap="medium")
+            
+            # --- LEFT COLUMN: LEAD EXPLORER LIST ---
+            with col_list:
+                st.markdown(f"##### Lead Queue ({len(filtered_leads)} visible)")
+                
+                lead_options = {}
+                for l in filtered_leads:
+                    lid = l.get("lead_id", "unknown")
+                    name = l.get("name", "Unknown Business")
+                    score = l.get("score")
+                    band = l.get("band")
+                    dec = l.get("decision", "pending")
+                    
+                    if dec in ["approve", "edit"]:
+                        status_tag = "[APPROVED]"
+                    elif dec == "reject":
+                        status_tag = "[REJECTED]"
+                    else:
+                        status_tag = "[PENDING]"
+                        
+                    if band:
+                        score_str = f"Band {band} · {score}pts"
+                    else:
+                        score_str = "Stage 1"
+                        
+                    label = f"{status_tag} {name} ({score_str})"
+                    lead_options[label] = l
+                    
+                selected_label = st.selectbox(
+                    "Select Lead to Review",
+                    options=list(lead_options.keys()),
+                    index=0,
+                    label_visibility="collapsed"
+                )
+                
+                selected_lead = lead_options[selected_label]
+                
+                st.markdown("---")
+                st.markdown("###### Quick Lead Overview")
+                for idx, l in enumerate(filtered_leads[:8]):
+                    lid = l.get("lead_id", "")
+                    lname = l.get("name", "")
+                    lscore = l.get("score", 0)
+                    lband = l.get("band")
+                    ldec = l.get("decision", "pending")
+                    
+                    if lband == "A":
+                        band_css = "badge-band-a"
+                        band_txt = f"Band A · {lscore}"
+                    elif lband == "B":
+                        band_css = "badge-band-b"
+                        band_txt = f"Band B · {lscore}"
+                    elif lband == "C":
+                        band_css = "badge-band-c"
+                        band_txt = f"Band C · {lscore}"
+                    else:
+                        band_css = "badge-band-raw"
+                        band_txt = "Stage 1 Lead"
+                        
+                    status_css = "badge-status-approved" if ldec in ["approve", "edit"] else ("badge-status-rejected" if ldec == "reject" else "badge-status-pending")
+                    status_txt = "APPROVED" if ldec in ["approve", "edit"] else ("REJECTED" if ldec == "reject" else "PENDING")
+                    
+                    st.markdown(f"""
+                    <div style="background: rgba(15, 23, 42, 0.6); padding: 0.55rem 0.8rem; border-radius: 8px; margin-bottom: 0.45rem; border: 1px solid rgba(255,255,255,0.06); display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <div style="font-weight: 600; font-size: 0.85rem; color: #f8fafc;">{lname}</div>
+                            <div style="font-size: 0.75rem; color: #64748b;">{lid} · {l.get('city', '')}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <span class="badge {band_css}">{band_txt}</span>
+                            <div style="margin-top: 0.2rem;"><span class="badge {status_css}">{status_txt}</span></div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                if len(filtered_leads) > 8:
+                    st.caption(f"... and {len(filtered_leads) - 8} more leads in queue.")
+
+            # --- RIGHT COLUMN: SELECTED LEAD DETAIL & ACTION WORKBENCH ---
+            with col_detail:
+                lid = selected_lead.get("lead_id", "")
+                name = selected_lead.get("name", "Unknown Business")
+                domain = selected_lead.get("domain", "")
+                city = selected_lead.get("city", "")
+                category = selected_lead.get("category", "")
+                phone = selected_lead.get("phone", "N/A")
+                score = selected_lead.get("score")
+                band = selected_lead.get("band")
+                reasons = selected_lead.get("score_reasons", [])
+                findings = selected_lead.get("findings", [])
+                site_text = selected_lead.get("site_text", "")
+                current_decision = selected_lead.get("decision", "pending")
+                
+                url = f"https://{domain}" if domain and not domain.startswith("http") else domain
+                
+                # Header Styling
+                if band == "A":
+                    band_css = "badge-band-a"
+                    band_txt = f"Band A · {score}/100"
+                elif band == "B":
+                    band_css = "badge-band-b"
+                    band_txt = f"Band B · {score}/100"
+                elif band == "C":
+                    band_css = "badge-band-c"
+                    band_txt = f"Band C · {score}/100"
+                else:
+                    band_css = "badge-band-raw"
+                    band_txt = "Stage 1 (Raw OSM)"
+                    
+                status_css = "badge-status-approved" if current_decision in ["approve", "edit"] else ("badge-status-rejected" if current_decision == "reject" else "badge-status-pending")
+                status_txt = "APPROVED" if current_decision in ["approve", "edit"] else ("REJECTED" if current_decision == "reject" else "PENDING REVIEW")
+                
+                st.markdown(f"""
+                <div style="background:#1e293b; padding:1.35rem; border-radius:12px; border:1px solid rgba(255,255,255,0.08); margin-bottom:1rem;">
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:0.5rem;">
+                        <div>
+                            <h2 style="margin:0; font-size:1.6rem; color:#f8fafc; font-weight:800;">{name}</h2>
+                            <div style="margin-top:0.4rem; font-size:0.9rem; color:#94a3b8;">
+                                <a href="{url}" target="_blank" style="color:#38bdf8; text-decoration:none; font-weight:600;">{domain}</a>
+                                &nbsp;·&nbsp; Location: {city} &nbsp;·&nbsp; Category: {category} &nbsp;·&nbsp; Phone: {phone or 'No phone listed'}
+                            </div>
+                        </div>
+                        <div style="text-align:right;">
+                            <span class="badge {band_css}" style="font-size:0.85rem; padding:0.35rem 0.85rem;">{band_txt}</span>
+                            <div style="margin-top:0.4rem;"><span class="badge {status_css}">{status_txt}</span></div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Health checklist if Stage 2 is present
+                loads_5s = selected_lead.get("loads_under_5s")
+                mobile_ok = selected_lead.get("mobile_friendly")
+                contact_ok = selected_lead.get("has_contact_method")
+                meta_ok = selected_lead.get("has_meta_description")
+                visual_ok = selected_lead.get("visual_ok")
+                
+                if visual_ok is not None:
+                    st.markdown(f"""
+                    <div style="margin-bottom:1rem;">
+                        <span class="health-pill" style="color:{'#4ade80' if visual_ok else '#fb7185'};">Visual Audit: {'Pass' if visual_ok else 'Fail'}</span>
+                        <span class="health-pill" style="color:{'#4ade80' if loads_5s else '#facc15'};">Load Speed: {'< 5s' if loads_5s else '> 5s'}</span>
+                        <span class="health-pill" style="color:{'#4ade80' if mobile_ok else '#facc15'};">Mobile: {'Responsive' if mobile_ok else 'Unoptimized'}</span>
+                        <span class="health-pill" style="color:{'#4ade80' if contact_ok else '#facc15'};">Contact: {'Available' if contact_ok else 'None'}</span>
+                        <span class="health-pill" style="color:{'#4ade80' if meta_ok else '#facc15'};">Meta Description: {'Present' if meta_ok else 'Missing'}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # --- SECTION: AUDIT SCREENSHOTS ---
+                st.markdown("#### Website Visual Audit")
+                sc_col1, sc_col2 = st.columns(2)
+                
+                desktop_img = selected_lead.get("screenshot_desktop", "")
+                mobile_img = selected_lead.get("screenshot_mobile", "")
+                
+                with sc_col1:
+                    st.caption("Desktop Viewport")
+                    if desktop_img and os.path.exists(desktop_img):
+                        st.image(desktop_img, width="stretch")
+                    else:
+                        st.markdown(f"""
+                        <div class="screenshot-fallback">
+                            <div style="font-size: 0.85rem; font-weight:700; color:#94a3b8; margin-bottom:0.3rem;">DESKTOP VIEWPORT</div>
+                            <strong>Screenshot Pending</strong>
+                            <div style="margin-top:0.25rem; font-size:0.75rem; color:#64748b;">Target: <code>{desktop_img or f'screenshots/{lid}_d.png'}</code></div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                with sc_col2:
+                    st.caption("Mobile Viewport")
+                    if mobile_img and os.path.exists(mobile_img):
+                        st.image(mobile_img, width="stretch")
+                    else:
+                        st.markdown(f"""
+                        <div class="screenshot-fallback">
+                            <div style="font-size: 0.85rem; font-weight:700; color:#94a3b8; margin-bottom:0.3rem;">MOBILE VIEWPORT</div>
+                            <strong>Screenshot Pending</strong>
+                            <div style="margin-top:0.25rem; font-size:0.75rem; color:#64748b;">Target: <code>{mobile_img or f'screenshots/{lid}_m.png'}</code></div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                if reasons:
+                    st.markdown("<br><strong>Key Opportunity Drivers:</strong>", unsafe_allow_html=True)
+                    for r in reasons:
+                        st.markdown(f"- {r}")
+                        
+                # Extracted website text if available
+                if site_text and not findings:
+                    with st.expander("View Extracted Website Text (Stage 1)", expanded=False):
+                        st.text_area("Site Content", value=site_text, height=180, disabled=True)
+                        
+                st.markdown("---")
+                
+                # --- SECTION: VERIFIED FINDINGS ---
+                st.markdown("#### Verified LLM Findings (Stage 3)")
+                if not findings:
+                    st.info("No structured findings attached yet (Stage 3 LLM research runs before drafting).")
+                else:
+                    for f in findings:
+                        claim = f.get("claim", "")
+                        quote = f.get("quote", "")
+                        cat = f.get("category", "content").upper()
+                        verified = f.get("quote_verified", False)
+                        v_badge = "VERIFIED QUOTE" if verified else "UNVERIFIED"
+                        v_color = "#34d399" if verified else "#facc15"
+                        
+                        st.markdown(f"""
+                        <div class="finding-box">
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <span class="finding-claim">{claim}</span>
+                                <span style="font-size:0.75rem; font-weight:700; color:{v_color};">{v_badge} · {cat}</span>
+                            </div>
+                            <div class="finding-quote">"{quote}"</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                st.markdown("---")
+                
+                # --- SECTION: OUTREACH WORKBENCH ---
+                st.markdown("#### Outreach Email Workbench")
+                
+                # Defaults
+                if not selected_lead.get("subject") and not selected_lead.get("final_subject"):
+                    default_subj = f"Quick question regarding online reservations for {name}"
+                else:
+                    default_subj = selected_lead.get("final_subject") or selected_lead.get("subject")
+                    
+                if not selected_lead.get("body") and not selected_lead.get("final_body"):
+                    default_body = f"Hi {name} team,\n\nI was looking through your website ({domain}) and noticed you have a great offering in {city}.\n\nI wanted to share a quick suggestion that could help improve customer inquiries.\n\nBest regards,\nLeadForge Outreach Team"
+                else:
+                    default_body = selected_lead.get("final_body") or selected_lead.get("body")
+                
+                with st.form(key=f"review_form_{lid}"):
+                    edit_subject = st.text_input("Email Subject Line", value=default_subj)
+                    edit_body = st.text_area("Email Body (Markdown / Plaintext)", value=default_body, height=220)
+                    
+                    words = len(edit_body.split())
+                    chars = len(edit_body)
+                    st.caption(f"Length: **{words} words** · **{chars} characters** · Estimated read time: ~{max(1, words // 200)} min")
+                    
+                    btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
+                    
+                    with btn_col1:
+                        approve_btn = st.form_submit_button("Approve Draft", width="stretch")
+                    with btn_col2:
+                        edit_approve_btn = st.form_submit_button("Save Edit & Approve", width="stretch")
+                    with btn_col3:
+                        reject_btn = st.form_submit_button("Reject Lead", width="stretch")
+                    with btn_col4:
+                        revert_btn = st.form_submit_button("Revert to Pending", width="stretch")
+                        
+                if approve_btn:
+                    save_decision(
+                        lead_record=selected_lead,
+                        decision="approve",
+                        final_subject=edit_subject,
+                        final_body=edit_body,
+                        reviewer=reviewer_name,
+                        approved_file=DEFAULT_APPROVED_PATH
+                    )
+                    st.success(f"Lead '{name}' ({lid}) approved and saved to {DEFAULT_APPROVED_PATH}")
+                    st.rerun()
+                    
+                elif edit_approve_btn:
+                    save_decision(
+                        lead_record=selected_lead,
+                        decision="approve",
+                        final_subject=edit_subject,
+                        final_body=edit_body,
+                        reviewer=reviewer_name,
+                        approved_file=DEFAULT_APPROVED_PATH
+                    )
+                    st.success(f"Lead '{name}' ({lid}) edited and approved.")
+                    st.rerun()
+                    
+                elif reject_btn:
+                    save_decision(
+                        lead_record=selected_lead,
+                        decision="reject",
+                        final_subject=edit_subject,
+                        final_body=edit_body,
+                        reviewer=reviewer_name,
+                        approved_file=DEFAULT_APPROVED_PATH
+                    )
+                    st.error(f"Lead '{name}' ({lid}) marked as rejected.")
+                    st.rerun()
+                    
+                elif revert_btn:
+                    remove_decision(lid, DEFAULT_APPROVED_PATH)
+                    st.info(f"Lead '{name}' ({lid}) reverted to Pending.")
+                    st.rerun()
+
+    # ==============================================================================
+    # TAB 2: LIVE TEAMMATE PIPELINE TRACKER
+    # ==============================================================================
+
+    with tab_pipeline:
+        st.markdown("### Live Pipeline Flow & Teammate Status")
+        st.write("Each stage reads the JSONL output of the previous stage and adds its fields. Check the live status of each stage file in `data/` below:")
+        
+        stage_cols = st.columns(3)
+        for idx, s in enumerate(PIPELINE_STAGES):
+            col_idx = idx % 3
+            stage_file = s["file"]
+            file_exists = os.path.exists(stage_file)
+            row_count = len(load_jsonl(stage_file)) if file_exists else 0
+            
+            status_badge = f'<span style="color:#4ade80; font-weight:700;">[Active: {row_count} rows]</span>' if file_exists else '<span style="color:#94a3b8; font-weight:500;">[Waiting]</span>'
+            
+            with stage_cols[col_idx]:
+                st.markdown(f"""
+                <div class="pipeline-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-weight:800; font-size:1.1rem; color:#f8fafc;">Stage {s['stage_num']} · {s['name']}</span>
+                        {status_badge}
+                    </div>
+                    <div style="color:#6366f1; font-size:0.85rem; font-weight:600; margin-top:0.25rem;">Owner: {s['owner']}</div>
+                    <div style="color:#94a3b8; font-size:0.8rem; margin-top:0.35rem;">{s['desc']}</div>
+                    <div style="margin-top:0.5rem; font-size:0.75rem; color:#64748b;">File: <code>{s['file']}</code></div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+        st.markdown("---")
+        st.markdown("#### Preview Teammate Dataset")
+        preview_file = st.selectbox(
+            "Select Pipeline Stage File to Inspect",
+            options=[s["file"] for s in PIPELINE_STAGES if os.path.exists(s["file"])],
+            index=0
+        )
+        
+        if preview_file:
+            preview_rows = load_jsonl(preview_file)
+            st.caption(f"Showing **{len(preview_rows)} records** from `{preview_file}`")
+            if preview_rows:
+                df_preview = pd.DataFrame(preview_rows)
+                display_cols = [c for c in df_preview.columns if c not in ["site_text"]]
+                st.dataframe(df_preview[display_cols], width="stretch")
+
+    # ==============================================================================
+    # TAB 3: APPROVED OUTBOX
+    # ==============================================================================
+
+    with tab_approved_queue:
+        st.markdown("### Approved Outbox (`data/06_approved.jsonl`)")
+        st.write("Approved drafts are written here. Mian Usman's delivery script (`send_approved.py`) reads this file to deliver messages to Mailtrap.")
+        
+        approved_records = load_jsonl(DEFAULT_APPROVED_PATH)
+        
+        if not approved_records:
+            st.info("No leads approved yet. Go to 'Lead Review & Action' to approve leads.")
+        else:
+            summary_data = []
+            for r in approved_records:
+                summary_data.append({
+                    "Lead ID": r.get("lead_id"),
+                    "Business Name": r.get("name"),
+                    "City": r.get("city"),
+                    "Score": r.get("score"),
+                    "Band": r.get("band"),
+                    "Decision": r.get("decision", "").upper(),
+                    "Subject": r.get("final_subject") or r.get("subject"),
+                    "Reviewer": r.get("decided_by"),
+                    "Timestamp (UTC)": r.get("decided_at")
+                })
+                
+            df_approved = pd.DataFrame(summary_data)
+            st.dataframe(df_approved, width="stretch")
+            
+            with open(DEFAULT_APPROVED_PATH, "r", encoding="utf-8") as f:
+                raw_approved_jsonl = f.read()
+                
+            st.download_button(
+                label="Download 06_approved.jsonl",
+                data=raw_approved_jsonl,
+                file_name="06_approved.jsonl",
+                mime="application/x-jsonlines",
+                width="stretch"
+            )
+
+    # ==============================================================================
+    # TAB 4: RAW JSON INSPECTOR
+    # ==============================================================================
+
+    with tab_raw_inspector:
+        st.markdown("### Raw Record Debugger")
+        st.write("Inspect the raw dictionary object for the selected lead to verify field preservation across pipeline stages.")
+        
+        if filtered_leads:
+            st.json(selected_lead)
+        else:
+            st.info("No lead selected.")
+
+
+if __name__ == "__main__":
+    render_app()
